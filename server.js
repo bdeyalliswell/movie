@@ -11,34 +11,36 @@ const port = process.env.PORT || 10000;
 
 const apiId = Number(process.env.API_ID);
 const apiHash = process.env.API_HASH;
-const session = new StringSession(process.env.SESSION_STRING);
+// সেশন স্ট্রিংয়ের ভেতরের অপ্রয়োজনীয় স্পেস ট্রিম করা
+const rawSession = (process.env.SESSION_STRING || "").trim();
+const session = new StringSession(rawSession);
 const CHANNEL_ID = BigInt(process.env.CHANNEL_ID);
 
-// ক্লাউড কমপ্যাটিবল GramJS ক্লায়েন্ট (Render Timeout & DNS Fix)
+// ক্লাউড ডক ও রেন্ডার ফায়ারওয়াল বাইপাস কনফিগারেশন (WSS + Secure Ports)
 const client = new TelegramClient(session, apiId, apiHash, {
-  connectionRetries: 10,
-  retryDelay: 2000,
+  connectionRetries: 15,
+  retryDelay: 3000,
   autoReconnect: true,
-  useWSS: false,
-  testServers: false,
+  useWSS: true, // ক্লাউডে পোর্ট ৮০ ব্লকের বদলে সিকিউর ৪৪৩ পোর্ট দিয়ে কানেক্ট হবে
+  timeout: 30000,
 });
 
 let isClientConnected = false;
 
-async function initTelegram() {
+async function getConnectedClient() {
   if (!isClientConnected) {
     try {
       await client.connect();
       isClientConnected = true;
-      console.log("Telegram Client connected securely.");
+      console.log("Telegram Client connected securely via Cloud.");
     } catch (err) {
       console.error("Telegram Connection Error:", err.message);
     }
   }
+  return client;
 }
-initTelegram();
 
-// ক্যাপশন পার্স করার হেল্পার
+// ক্যাপশন পার্স করার লজিক
 function parseCaption(text, fallbackFileName, msgId) {
   if (!text) {
     return {
@@ -56,7 +58,6 @@ function parseCaption(text, fallbackFileName, msgId) {
   let seriesInfo = "";
   const seriesMatch = text.match(/Series\s*Info[^\w\n\r:]*[:#]\s*([^\n\r]+)/i);
   if (seriesMatch && seriesMatch[1]) {
-    seriesMatch[1].trim();
     seriesInfo = seriesMatch[1].trim();
   }
 
@@ -97,16 +98,16 @@ function saveIndexedVideos(data) {
   }
 }
 
-// চ্যানেলের সাম্প্রতিক ভিডিও ব্যাকগ্রাউন্ডে অটো-সিঙ্ক (টাইমআউট-মুক্ত)
+// ব্যাকগ্রাউন্ড অটো-সিঙ্ক
 let lastCheckTime = 0;
 async function syncLatestVideos() {
   const now = Date.now();
-  if (now - lastCheckTime < 60 * 1000) return; // প্রতি ১ মিনিটে সর্বোচ্চ ১ বার চেক করবে
+  if (now - lastCheckTime < 60 * 1000) return;
   lastCheckTime = now;
 
   try {
-    await initTelegram();
-    const latestMessages = await client.getMessages(CHANNEL_ID, { limit: 10 });
+    const tg = await getConnectedClient();
+    const latestMessages = await tg.getMessages(CHANNEL_ID, { limit: 10 });
     const currentVideos = getIndexedVideos();
     let hasNew = false;
 
@@ -147,11 +148,14 @@ async function syncLatestVideos() {
   }
 }
 
+// সার্ভার চালু হওয়ার সাথে কানেকশন ইনিশিয়ালাইজ
+getConnectedClient();
+
 app.use(express.static(path.join(__dirname, "public")));
 
-// ১. ভিডিও তালিকা API
+// ১. ভিডিও লিস্ট ও পেজিনেশন API
 app.get("/api/videos", async (req, res) => {
-  syncLatestVideos(); // ব্যাকগ্রাউন্ডে নতুন পোস্ট চেক ট্রিগার
+  syncLatestVideos();
 
   const page = parseInt(req.query.page) || 1;
   const limit = 20;
@@ -184,12 +188,12 @@ app.get("/api/videos", async (req, res) => {
   });
 });
 
-// ২. থাম্বনেইল API
+// ২. থাম্বনেইল API (HD & Fallback Handled)
 app.get("/api/thumb/:messageId", async (req, res) => {
   try {
-    await initTelegram();
+    const tg = await getConnectedClient();
     const messageId = parseInt(req.params.messageId);
-    const [msg] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+    const [msg] = await tg.getMessages(CHANNEL_ID, { ids: [messageId] });
 
     if (!msg || !msg.media || !msg.media.document) {
       return res.status(404).send("Thumb not found");
@@ -216,7 +220,7 @@ app.get("/api/thumb/:messageId", async (req, res) => {
       selectedThumb = nonStripped.length > 0 ? nonStripped[nonStripped.length - 1] : thumbs[thumbs.length - 1];
     }
 
-    const buffer = await client.downloadMedia(msg.media, { thumb: selectedThumb });
+    const buffer = await tg.downloadMedia(msg.media, { thumb: selectedThumb });
     if (!buffer) return res.status(404).send("Failed");
 
     res.writeHead(200, {
@@ -232,9 +236,9 @@ app.get("/api/thumb/:messageId", async (req, res) => {
 // ৩. স্ট্রিমিং API
 app.get("/api/stream/:messageId", async (req, res) => {
   try {
-    await initTelegram();
+    const tg = await getConnectedClient();
     const messageId = parseInt(req.params.messageId);
-    const [message] = await client.getMessages(CHANNEL_ID, { ids: [messageId] });
+    const [message] = await tg.getMessages(CHANNEL_ID, { ids: [messageId] });
 
     if (!message || !message.media || !message.media.document) {
       return res.status(404).send("File not found");
@@ -260,7 +264,7 @@ app.get("/api/stream/:messageId", async (req, res) => {
         "Content-Type": mimeType,
       });
 
-      const iter = client.iterDownload({
+      const iter = tg.iterDownload({
         file: message.media,
         offset: bigInt(start),
         limit: chunkSize,
@@ -279,7 +283,7 @@ app.get("/api/stream/:messageId", async (req, res) => {
         "Accept-Ranges": "bytes",
       });
 
-      const iter = client.iterDownload({
+      const iter = tg.iterDownload({
         file: message.media,
         requestSize: 1024 * 1024,
       });
