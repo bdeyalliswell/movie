@@ -1,0 +1,17 @@
+{
+  "name": "tg-stream-app",
+  "version": "1.0.0",
+  "description": "Secure Telegram Channel Video Streaming Platform",
+  "main": "server.js",
+  "scripts": {
+    "login": "node generate_session.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "big-integer": "^1.6.52",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "input": "^1.0.1",
+    "telegram": "^2.22.2"
+  }
+}
